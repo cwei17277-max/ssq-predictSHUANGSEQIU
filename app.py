@@ -6,6 +6,9 @@ import random
 import json
 from typing import Dict, List, Any
 
+# ==========================================
+# 专属腾讯云 Serverless 代理 URL
+# ==========================================
 PROXY_URL = "https://1333364180-9213182ptj.ap-guangzhou.tencentscf.com"
 
 class LotteryEngine:
@@ -36,7 +39,7 @@ class LotteryEngine:
                     blue_str = item.get("blue", "")
                     if red_str:
                         reds = [int(x) for x in red_str.split(",") if x.isdigit()]
-                        blue = int(blue_str) if blue_str and blue_str.isdigit() else None
+                        blue = int(blue_str) if blue_str and str(blue_str).isdigit() else None
                         results.append({"period": str(code), "reds": reds, "blue": blue})
 
             # 2. 超级大乐透
@@ -75,10 +78,17 @@ class LotteryEngine:
         if not history:
             return {"error": "暂无法解析有效数据，请重新点击或检查网络"}
 
-        latest_period = history[0]["period"]
+        latest_item = history[0]
+        latest_period = latest_item["period"]
         total_fetched = len(history)
 
+        # ----------------------------------------------------
+        # 1. 双色球 (SSQ)
+        # ----------------------------------------------------
         if lottery_type == "ssq":
+            # 格式化最新一期开奖号码
+            latest_draw = f"🔴 红球: {latest_item['reds']}  |  🔵 蓝球: [{latest_item['blue']}]"
+
             all_reds = [num for item in history for num in item["reds"]]
             hot_reds = pd.Series(all_reds).value_counts().head(15).index.tolist()
             if len(hot_reds) < 6: hot_reds = list(range(1, 34))
@@ -90,13 +100,19 @@ class LotteryEngine:
             return {
                 "彩种": "双色球",
                 "最新期号": latest_period,
+                "最新开奖号码": latest_draw,
                 "解析期数": total_fetched,
                 "推荐组合": f"🔴 红球: {rec_reds}  |  🔵 蓝球: [{hot_blue}]",
                 "红球高频热码池": hot_reds,
                 "推荐和值": sum(rec_reds)
             }
 
+        # ----------------------------------------------------
+        # 2. 超级大乐透 (DLT)
+        # ----------------------------------------------------
         elif lottery_type == "dlt":
+            latest_draw = f"🔴 前区: {latest_item['reds']}  |  🔵 后区: {latest_item.get('blues', [])}"
+
             all_reds = [num for item in history for num in item["reds"]]
             hot_reds = pd.Series(all_reds).value_counts().head(15).index.tolist()
             if len(hot_reds) < 5: hot_reds = list(range(1, 36))
@@ -108,13 +124,21 @@ class LotteryEngine:
             return {
                 "彩种": "超级大乐透",
                 "最新期号": latest_period,
+                "最新开奖号码": latest_draw,
                 "解析期数": total_fetched,
                 "推荐组合": f"🔴 前区(红): {rec_reds}  |  🔵 后区(蓝): {hot_blues}",
                 "前区热码池": hot_reds,
                 "推荐和值": sum(rec_reds)
             }
 
+        # ----------------------------------------------------
+        # 3. 福彩 3D
+        # ----------------------------------------------------
         elif lottery_type == "3d":
+            nums = latest_item['reds']
+            draw_str = "".join(map(str, nums)) if len(nums) == 3 else str(nums)
+            latest_draw = f"🎯 开奖号码: [{draw_str}] (百: {nums[0]} | 十: {nums[1]} | 个: {nums[2]})"
+
             pos1 = [item["reds"][0] for item in history if len(item["reds"]) == 3]
             pos2 = [item["reds"][1] for item in history if len(item["reds"]) == 3]
             pos3 = [item["reds"][2] for item in history if len(item["reds"]) == 3]
@@ -126,12 +150,18 @@ class LotteryEngine:
             return {
                 "彩种": "福彩 3D",
                 "最新期号": latest_period,
+                "最新开奖号码": latest_draw,
                 "解析期数": total_fetched,
                 "推荐组合": f"🎯 百位: [{d1}] | 十位: [{d2}] | 个位: [{d3}]  (直选号码: {d1}{d2}{d3})",
                 "推荐和值": d1 + d2 + d3
             }
 
+        # ----------------------------------------------------
+        # 4. 香港六合彩 (LHC)
+        # ----------------------------------------------------
         elif lottery_type == "lhc":
+            latest_draw = f"🔴 正码: {latest_item['reds']}  |  🌟 特码: [{latest_item['blue']}]"
+
             all_reds = [num for item in history for num in item["reds"]]
             hot_reds = pd.Series(all_reds).value_counts().head(18).index.tolist()
             if len(hot_reds) < 6: hot_reds = list(range(1, 50))
@@ -147,6 +177,7 @@ class LotteryEngine:
             return {
                 "彩种": "香港六合彩",
                 "最新期号": latest_period,
+                "最新开奖号码": latest_draw,
                 "解析期数": total_fetched,
                 "推荐组合": f"🔴 正码(6位): {rec_reds}  |  🌟 推荐精选特码: [{top_special}]",
                 "热门特码候选(Top3)": top3_specials,
@@ -185,7 +216,8 @@ def main():
                 res = LotteryEngine.analyze(lottery_choice, history_count, sim_count)
 
                 if "error" not in res:
-                    st.success(f"✅ 通道连通成功！已同步最新第 **{res['最新期号']}** 期数据。")
+                    # 显示包含最新开奖号码的完整成功提示
+                    st.success(f"✅ **通道连通成功！** 已同步最新第 **{res['最新期号']}** 期数据。\n\n🎉 **本期实际开奖号码**：{res['最新开奖号码']}")
                     st.markdown("---")
                     st.subheader("💡 算法推演推荐号码")
                     st.markdown(f"### {res['推荐组合']}")
