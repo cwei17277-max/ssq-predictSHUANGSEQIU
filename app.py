@@ -15,10 +15,10 @@ class LotteryEngine:
     def fetch_data(lottery_type: str, limit: int = 100) -> List[Dict]:
         try:
             url = f"{PROXY_URL}?type={lottery_type}&limit={limit}"
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, timeout=12)
             
             if res.status_code != 200:
-                st.error(f"代理通道响应状态码异常: {res.status_code}")
+                st.error(f"代理通道响应状态码异常 ({res.status_code})，请检查云函数配置。")
                 return []
 
             data = res.json()
@@ -27,52 +27,58 @@ class LotteryEngine:
 
             results = []
 
-            # 1. 针对开放彩票 API 解析
-            if "data" in data and isinstance(data["data"], list):
-                for item in data["data"][:limit]:
-                    code = item.get("expect", item.get("code", item.get("period", "")))
-                    open_num = item.get("opencode", item.get("openCode", ""))
-                    if open_num:
-                        # 兼容红蓝球分隔符格式（例: "01,05,12,18,25,30+08" 或 "01,05,12,18,25,30|08"）
-                        if "+" in open_num:
-                            parts = open_num.split("+")
-                        elif "|" in open_num:
-                            parts = open_num.split("|")
-                        else:
-                            parts = [open_num, ""]
+            # 获取数组主体
+            data_list = []
+            if isinstance(data, list):
+                data_list = data
+            elif isinstance(data, dict):
+                if "data" in data and isinstance(data["data"], list):
+                    data_list = data["data"]
+                elif "result" in data and isinstance(data["result"], list):
+                    data_list = data["result"]
+                elif "value" in data and isinstance(data["value"], dict) and "list" in data["value"]:
+                    data_list = data["value"]["list"]
 
-                        red_str = parts[0]
-                        blue_str = parts[1] if len(parts) > 1 else ""
+            for item in data_list[:limit]:
+                # 兼容不同 API 的期号字段
+                code = str(item.get("expect", item.get("code", item.get("period", item.get("lotteryDrawNum", "")))))
+                
+                # 兼容不同 API 的开奖号码字段
+                open_num = str(item.get("opencode", item.get("openCode", item.get("lotteryDrawResult", item.get("number", "")))))
 
-                        reds = [int(x) for x in red_str.replace(" ", ",").split(",") if x.isdigit()]
-                        blues = [int(x) for x in blue_str.replace(" ", ",").split(",") if x.isdigit()]
+                if open_num and open_num != "None":
+                    # 处理带加号/竖线/空格的分隔符
+                    open_num = open_num.replace("+", "|").replace(" ", ",").replace("-", ",")
+                    parts = open_num.split("|")
 
-                        blue = blues[0] if blues else None
-                        results.append({"period": str(code), "reds": reds, "blue": blue, "blues": blues})
+                    red_str = parts[0]
+                    blue_str = parts[1] if len(parts) > 1 else ""
 
-            # 2. 超级大乐透官方网关 API 解析
-            elif lottery_type == "dlt" and "value" in data:
-                raw_list = data.get("value", {}).get("list", [])
-                for item in raw_list[:limit]:
-                    code = item.get("lotteryDrawNum", "")
-                    nums_str = item.get("lotteryDrawResult", "")
-                    if nums_str:
-                        parts = nums_str.split()
-                        if len(parts) >= 7:
-                            reds = [int(x) for x in parts[:5] if x.isdigit()]
-                            blues = [int(x) for x in parts[5:7] if x.isdigit()]
-                            results.append({"period": str(code), "reds": reds, "blues": blues, "blue": None})
+                    # 提取红球数字
+                    reds = [int(x) for x in red_str.split(",") if x.strip().isdigit()]
+                    
+                    # 提取蓝球数字
+                    blues = [int(x) for x in blue_str.split(",") if x.strip().isdigit()]
+
+                    if reds:
+                        blue = blues[0] if blues else (blues if len(blues) > 0 else None)
+                        results.append({
+                            "period": code,
+                            "reds": reds,
+                            "blue": blue,
+                            "blues": blues
+                        })
 
             return results
         except Exception as e:
-            st.error(f"数据解析失败: {e}")
+            st.error(f"数据解析异常: {e}")
             return []
 
     @classmethod
     def analyze(cls, lottery_type: str, history_limit: int = 100, sim_count: int = 10000) -> Dict[str, Any]:
         history = cls.fetch_data(lottery_type, limit=history_limit)
         if not history:
-            return {"error": "暂无法获取真实 API 开奖数据，请检查网络或更换彩种后再试"}
+            return {"error": "暂无法获取真实 API 开奖数据，请检查云函数部署或网络连通性"}
 
         latest_item = history[0]
         latest_period = latest_item["period"]
@@ -100,7 +106,7 @@ class LotteryEngine:
             }
 
         elif lottery_type == "dlt":
-            latest_draw = f"🔴 前区: {latest_item['reds']}  |  🔵 后区: {latest_item.get('blues', [])}"
+            latest_draw = f"🔴 前区: {latest_item['reds'][:5]}  |  🔵 后区: {latest_item.get('blues', []) or latest_item['reds'][5:]}"
 
             all_reds = [num for item in history for num in item["reds"]]
             hot_reds = pd.Series(all_reds).value_counts().head(15).index.tolist()
@@ -125,9 +131,9 @@ class LotteryEngine:
             draw_str = "".join(map(str, nums)) if len(nums) == 3 else str(nums)
             latest_draw = f"🎯 开奖号码: [{draw_str}]"
 
-            pos1 = [item["reds"][0] for item in history if len(item["reds"]) == 3]
-            pos2 = [item["reds"][1] for item in history if len(item["reds"]) == 3]
-            pos3 = [item["reds"][2] for item in history if len(item["reds"]) == 3]
+            pos1 = [item["reds"][0] for item in history if len(item["reds"]) >= 3]
+            pos2 = [item["reds"][1] for item in history if len(item["reds"]) >= 3]
+            pos3 = [item["reds"][2] for item in history if len(item["reds"]) >= 3]
 
             d1 = int(pd.Series(pos1).value_counts().index[0]) if pos1 else random.randint(0, 9)
             d2 = int(pd.Series(pos2).value_counts().index[0]) if pos2 else random.randint(0, 9)
@@ -151,7 +157,6 @@ class LotteryEngine:
 
             rec_reds = sorted(random.sample(hot_reds, 6))
             all_specials = [item["blue"] for item in history if item["blue"] is not None]
-            
             top_special = int(pd.Series(all_specials).value_counts().index[0]) if all_specials else random.randint(1, 49)
 
             return {
