@@ -6,96 +6,69 @@ import random
 from typing import Dict, List, Any
 
 # ==========================================
-# 1. 核心分析与多源免费 API 引擎
+# 1. 实时 API 动态数据抓取引擎（支持 100 期真实数据抓取）
 # ==========================================
 class LotteryEngine:
-    """彩票数据分析引擎（具备全球 CDN 与海外节点加速）"""
+    """彩票数据分析引擎（实时 API 同步版）"""
 
     @staticmethod
-    def fetch_ssq_real_data(limit: int = 50) -> List[Dict]:
+    def fetch_ssq_real_data(limit: int = 100) -> List[Dict]:
         """
-        全球 CDN 加速版开奖接口抓取
+        从支持全球访问的开放 API 实时抓取最新双色球开奖数据（最高支持 100 期）
         """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "application/json"
         }
 
-        # 数据源 1：GitHub / jsDelivr 全球 CDN 开源彩票数据集
-        cdn_url = "https://cdn.jsdelivr.net/gh/fanying2016/lottery-data@master/ssq.json"
+        # 主通道：开源实时彩票 JSON 接口（支持跨国、100期抓取）
+        primary_api = f"https://api.oick.cn/lottery/api.php?type=ssq&limit={limit}"
         try:
-            res = requests.get(cdn_url, headers=headers, timeout=3)
+            res = requests.get(primary_api, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
+                raw_list = data.get("data", []) if isinstance(data, dict) else data
                 results = []
-                for item in data[:limit]:
-                    reds = [int(x) for x in item["red"].split(",")]
-                    blue = int(item["blue"])
-                    results.append({"period": str(item["code"]), "reds": reds, "blue": blue})
-                if results:
-                    return results
-        except Exception:
-            pass
-
-        # 数据源 2：开放 API 通道
-        open_api = f"https://api.oick.cn/lottery/api.php?type=ssq&limit={limit}"
-        try:
-            res = requests.get(open_api, headers=headers, timeout=3)
-            if res.status_code == 200:
-                data = res.json()
-                results = []
-                list_data = data.get("data", []) if isinstance(data, dict) else data
-                for item in list_data[:limit]:
+                for item in raw_list[:limit]:
                     if "red" in item and "blue" in item:
                         reds = [int(x) for x in item["red"].split(",")]
                         blue = int(item["blue"])
                         results.append({"period": str(item.get("code", "")), "reds": reds, "blue": blue})
-                if results:
+                if len(results) >= 10:
                     return results
         except Exception:
             pass
 
-        # 数据源 3：360 彩票数据源
-        url_360 = f"https://cq.360.cn/int/getlotterydata?lotid=2001&count={limit}"
+        # 备用通道 1：新浪彩票开放 RESTful 接口
+        sina_api = f"https://trend.caipiao.163.com/ssq/ssq_history.json?limit={limit}"
         try:
-            res = requests.get(url_360, headers=headers, timeout=3)
+            res = requests.get(sina_api, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 results = []
-                for item in data[:limit]:
-                    code_str = item.get("code", "")
-                    if "+" in code_str:
-                        red_part, blue_part = code_str.split("+")
-                        reds = [int(x) for x in red_part.split(",")]
-                        blue = int(blue_part)
-                        results.append({"period": item.get("issue", ""), "reds": reds, "blue": blue})
-                if results:
+                for item in data.get("data", [])[:limit]:
+                    reds = [int(x) for x in item["red"].split(",")]
+                    blue = int(item["blue"])
+                    results.append({"period": str(item.get("period", "")), "reds": reds, "blue": blue})
+                if len(results) >= 10:
                     return results
         except Exception:
             pass
 
-        # 极端情况下的兜底提示
-        st.info("ℹ️ 远程 API 响应超时，已启动本地高频算法模型")
-        return LotteryEngine._generate_mock_data("ssq", limit)
-
-    @staticmethod
-    def _generate_mock_data(lottery_type: str, limit: int) -> List[Dict]:
-        mock_data = []
-        for i in range(limit):
-            if lottery_type == "ssq":
-                reds = sorted(random.sample(range(1, 34), 6))
-                blue = random.randint(1, 16)
-                mock_data.append({"period": 2026001 + i, "reds": reds, "blue": blue})
-            elif lottery_type == "dlt":
-                front = sorted(random.sample(range(1, 36), 5))
-                back = sorted(random.sample(range(1, 13), 2))
-                mock_data.append({"period": 2026001 + i, "front": front, "back": back})
-        return mock_data
+        # 备用通道 2：如果云服务器 IP 完全被封锁，提示用户
+        st.error("⚠️ 所有的公共 API 节点当前均被云机房防火墙阻截，请检查网络或配置代理通道！")
+        return []
 
     @classmethod
-    def analyze_shuangseqiu(cls, history_limit: int = 50, sim_count: int = 10000) -> Dict[str, Any]:
+    def analyze_shuangseqiu(cls, history_limit: int = 100, sim_count: int = 10000) -> Dict[str, Any]:
+        """双色球实时数据分析：热码统计 + 概率算法碰撞"""
+        # 实时获取 API 数据
         history = cls.fetch_ssq_real_data(limit=history_limit)
         
+        if not history:
+            return {"error": "无法获取 API 实时数据"}
+
+        # 1. 统计真实历史数据中的红球频次（热码）
         all_reds = [num for item in history for num in item["reds"]]
         freq = pd.Series(all_reds).value_counts()
         hot_red_pool = freq.head(15).index.tolist()
@@ -103,12 +76,14 @@ class LotteryEngine:
         if len(hot_red_pool) < 6:
             hot_red_pool = list(range(1, 34))
 
+        # 2. 基于真实热码池进行算法推荐筛选
         recommended_reds = []
         for _ in range(sim_count):
             sample = sorted(random.sample(hot_red_pool, 6))
             odd_count = sum(1 for x in sample if x % 2 != 0)
             total_sum = sum(sample)
             
+            # 筛选标准：奇偶比 (2:4 ~ 4:2) + 和值区间 (80 ~ 120)
             if 2 <= odd_count <= 4 and 80 <= total_sum <= 120:
                 recommended_reds = sample
                 break
@@ -116,11 +91,13 @@ class LotteryEngine:
         if not recommended_reds:
             recommended_reds = sorted(random.sample(hot_red_pool, 6))
 
+        # 3. 统计蓝球真实冷热号
         all_blues = [item["blue"] for item in history]
         blue_freq = pd.Series(all_blues).value_counts()
         hot_blue = int(blue_freq.index[0]) if not blue_freq.empty else random.randint(1, 16)
 
         return {
+            "最新期号": history[0]["period"],
             "解析历史期数": len(history),
             "高频红球池": hot_red_pool,
             "推荐红球": recommended_reds,
@@ -129,153 +106,48 @@ class LotteryEngine:
             "奇偶比": f"{sum(1 for x in recommended_reds if x % 2 != 0)}:{sum(1 for x in recommended_reds if x % 2 == 0)}"
         }
 
-    @classmethod
-    def analyze_daletou(cls, history_limit: int = 50, sim_count: int = 10000) -> Dict[str, Any]:
-        history = cls._generate_mock_data("dlt", history_limit)
-        
-        all_fronts = [num for item in history for num in item["front"]]
-        freq = pd.Series(all_fronts).value_counts()
-        hot_front_pool = freq.head(15).index.tolist()
-        
-        if len(hot_front_pool) < 5:
-            hot_front_pool = list(range(1, 36))
-
-        recommended_front = []
-        for _ in range(sim_count):
-            sample = sorted(random.sample(hot_front_pool, 5))
-            if 75 <= sum(sample) <= 115:
-                recommended_front = sample
-                break
-                
-        if not recommended_front:
-            recommended_front = sorted(random.sample(hot_front_pool, 5))
-
-        recommended_back = sorted(random.sample(range(1, 13), 2))
-
-        return {
-            "解析历史期数": len(history),
-            "高频前区池": hot_front_pool,
-            "推荐前区": recommended_front,
-            "推荐后区": recommended_back,
-            "前区和值": sum(recommended_front)
-        }
-
-    @staticmethod
-    def analyze_kuaile8() -> Dict[str, Any]:
-        pool = list(range(1, 81))
-        return {"推荐号码": sorted(random.sample(pool, 10))}
-
-    @staticmethod
-    def analyze_shishicai() -> Dict[str, Any]:
-        return {"推荐五星号码": [random.randint(0, 9) for _ in range(5)]}
-
-    @staticmethod
-    def analyze_mark_six() -> Dict[str, Any]:
-        pool = list(range(1, 50))
-        numbers = random.sample(pool, 7)
-        return {
-            "推荐正码": sorted(numbers[:6]),
-            "推荐特别码": [numbers[6]]
-        }
-
 
 # ==========================================
-# 2. Streamlit Web UI 前端交互界面
+# 2. Streamlit Web 界面渲染
 # ==========================================
 def main():
     st.set_page_config(
-        page_title="彩票历史数据统计与算法推荐系统",
+        page_title="双色球实时 API 概率分析平台",
         page_icon="🎰",
         layout="wide"
     )
 
-    st.sidebar.title("🎰 彩票算法系统")
-    st.sidebar.markdown("""
-    **关于本系统：**
-    * 本程序已开启 CDN 全球加速通道，获取真实历史开奖数据。
-    * 基于冷热号概率分布、和值区间及奇偶比等统计特征进行号码筛选。
-    
-    ⚠️ **重要提示：**
-    彩票摇奖属于独立的随机事件。本系统仅供统计分析参考，无法保证 100% 中奖，请保持理性。
-    """)
-
-    st.title("📊 概率算法推荐与历史分析平台")
+    st.title("📊 双色球实时 API 数据分析与推荐")
     st.markdown("---")
 
-    tabs = st.tabs(["🔴 双色球", "🔵 大乐透", "⚡ 快乐8", "🎲 时时彩", "🐎 香港六合彩"])
-
-    with tabs[0]:
-        st.header("🔴 双色球数据分析")
-        col1, col2 = st.columns([1, 2])
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        history_count = st.slider("实时抓取最新历史期数", 10, 100, 100, step=10)
+        sim_count = st.slider("算法迭代推算次数", 1000, 50000, 10000, step=1000)
         
-        with col1:
-            history_count = st.slider("抓取历史开奖期数", 10, 100, 30, step=10, key="ssq_hist")
-            sim_count = st.slider("算法推算迭代次数", 1000, 50000, 10000, step=1000, key="ssq_sim")
-            
-            if st.button("开始分析并推算", key="btn_ssq"):
-                with st.spinner("正在解析数据与概率算法计算..."):
-                    res = LotteryEngine.analyze_shuangseqiu(history_count, sim_count)
-                    st.session_state['ssq_res'] = res
+        btn = st.button("🔄 连线 API 并实时计算", type="primary")
 
-        with col2:
-            if 'ssq_res' in st.session_state:
-                res = st.session_state['ssq_res']
-                st.success(f"已调取最近 {res['解析历史期数']} 期真实开奖记录进行模型推算！")
-                st.subheader("💡 算法推荐号码")
-                st.markdown(f"### 红球：`{res['推荐红球']}` | 蓝球：`{res['推荐蓝球']}`")
+    with col2:
+        if btn:
+            with st.spinner(f"正在跨国请求 API 接口，读取最新 {history_count} 期真实开奖数据..."):
+                res = LotteryEngine.analyze_shuangseqiu(history_count, sim_count)
                 
-                st.markdown("---")
-                st.subheader("📈 数据统计特征")
-                st.json({
-                    "历史高频红球池": res["高频红球池"],
-                    "红球和值": res["红球和值"],
-                    "奇偶比例": res["奇偶比"]
-                })
-
-    with tabs[1]:
-        st.header("🔵 大乐透数据分析")
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            history_count_dlt = st.slider("抓取历史开奖期数", 10, 100, 50, step=10, key="dlt_hist")
-            sim_count_dlt = st.slider("算法推算迭代次数", 1000, 50000, 10000, step=1000, key="dlt_sim")
-            
-            if st.button("开始分析并推算", key="btn_dlt"):
-                with st.spinner("正在解析数据与概率算法计算..."):
-                    res = LotteryEngine.analyze_daletou(history_count_dlt, sim_count_dlt)
-                    st.session_state['dlt_res'] = res
-
-        with col2:
-            if 'dlt_res' in st.session_state:
-                res = st.session_state['dlt_res']
-                st.success(f"已调取最近 {res['解析历史期数']} 期开奖数据进行模型推算！")
-                st.subheader("💡 算法推荐号码")
-                st.markdown(f"### 前区：`{res['推荐前区']}` | 后区：`{res['推荐后区']}`")
-                
-                st.markdown("---")
-                st.subheader("📈 数据统计特征")
-                st.json({
-                    "历史高频前区池": res["高频前区池"],
-                    "前区和值": res["前区和值"]
-                })
-
-    with tabs[2]:
-        st.header("⚡ 快乐8 (选十模式)")
-        if st.button("生成选十推荐号码", key="btn_kl8"):
-            res = LotteryEngine.analyze_kuaile8()
-            st.success(f"推荐选十组合：{res['推荐号码']}")
-
-    with tabs[3]:
-        st.header("🎲 时时彩 (五星模式)")
-        if st.button("生成五星推荐号码", key="btn_ssc"):
-            res = LotteryEngine.analyze_shishicai()
-            st.success(f"推荐五星组合：{res['推荐五星号码']}")
-
-    with tabs[4]:
-        st.header("🐎 香港六合彩")
-        if st.button("生成六合彩推荐号码", key="btn_m6"):
-            res = LotteryEngine.analyze_mark_six()
-            st.success(f"正码：{res['推荐正码']}  |  特别码：{res['推荐特别码']}")
+                if "error" not in res:
+                    st.success(f"✅ API 连接成功！已同步最新第 **{res['最新期号']}** 期及之前共 {res['解析历史期数']} 期真实开奖记录。")
+                    st.subheader("💡 算法推荐号码（基于最新真实热码推演）")
+                    st.markdown(f"### 🔴 红球：`{res['推荐红球']}` | 🔵 蓝球：`{res['推荐蓝球']}`")
+                    
+                    st.markdown("---")
+                    st.subheader("📈 最新 100 期热码统计特征")
+                    st.json({
+                        "最新开奖期号": res["最新期号"],
+                        "前15个高频热码池": res["高频红球池"],
+                        "推荐组合和值": res["红球和值"],
+                        "推荐组合奇偶比": res["奇偶比"]
+                    })
+                else:
+                    st.error("API 数据抓取失败，请检查 API 连接。")
 
 if __name__ == "__main__":
     main()
