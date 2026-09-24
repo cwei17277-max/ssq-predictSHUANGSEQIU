@@ -1,158 +1,244 @@
 import streamlit as st
 import pandas as pd
 import requests
-import random
+import re
 import json
 from typing import Dict, List, Any
 
-# 100% 真实备用数据源 (当海外网络被墙时保证真实期号与开奖号可读)
-REAL_FALLBACK_SSQ = [
-    {"period": "2026034", "reds": [2, 9, 14, 21, 25, 31], "blue": 8},
-    {"period": "2026033", "reds": [5, 11, 18, 20, 26, 33], "blue": 12},
-    {"period": "2026032", "reds": [1, 7, 12, 19, 23, 29], "blue": 4},
-    {"period": "2026031", "reds": [3, 10, 15, 22, 28, 30], "blue": 15},
-    {"period": "2026030", "reds": [6, 8, 13, 17, 24, 32], "blue": 9},
-]
-
-class AdvancedLotteryEngine:
-    """高级抗封锁多通道真实数据引擎"""
+class RealLotteryApiEngine:
+    """纯真实数据引擎：首选抓取不成功时，自动降级调取多个免费 API 数据源"""
 
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Referer": "https://www.cwl.gov.cn/"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
     }
 
     @classmethod
-    def fetch_ssq_data(cls, limit: int = 40) -> List[Dict]:
-        """多通道抓取真实双色球数据"""
+    def fetch_real_lottery(cls, lottery_type: str, limit: int = 40) -> List[Dict]:
+        """按顺序调用免费 API，成功即返回，失败自动切下一个免费 API"""
         
-        # 通道 1: 福彩官方开放 API (支持海外部分节点)
-        url1 = f"https://cq.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice?name=ssq&pageNo=1&pageSize={limit}"
+        # ---------------- 免费 API 1: 百度开放彩票接口 ----------------
         try:
-            res = requests.get(url1, headers=cls.HEADERS, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                items = data.get("result", [])
-                results = []
-                for item in items:
-                    code = str(item.get("code", ""))
-                    red_str = item.get("red", "")
-                    blue_str = item.get("blue", "")
-                    if red_str and blue_str:
-                        reds = [int(x) for x in red_str.split(",") if x.isdigit()]
-                        blue = int(blue_str) if blue_str.isdigit() else None
-                        results.append({"period": code, "reds": reds, "blue": blue, "blues": [blue]})
-                if results:
-                    return results
-        except Exception:
-            pass
-
-        # 通道 2: 百度彩票聚合 API
-        url2 = f"https://opendata.baidu.com/api.php?query=双色球&resource_id=3571&oe=utf-8"
-        try:
-            res = requests.get(url2, headers=cls.HEADERS, timeout=5)
+            name_map = {"ssq": "双色球", "dlt": "超级大乐透", "3d": "福彩3D", "lhc": "六合彩"}
+            url = f"https://opendata.baidu.com/api.php?query={name_map.get(lottery_type, '双色球')}&resource_id=3571&oe=utf-8"
+            res = requests.get(url, headers=cls.HEADERS, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 items = data.get("Result", [{}])[0].get("list", [])
                 results = []
                 for item in items[:limit]:
                     code = str(item.get("period", ""))
-                    # 提取数字
-                    numbers = item.get("number", "").split("+")
-                    if len(numbers) == 2:
-                        reds = [int(x) for x in numbers[0].split(",") if x.isdigit()]
-                        blue = int(numbers[1]) if numbers[1].isdigit() else None
-                        results.append({"period": code, "reds": reds, "blue": blue, "blues": [blue]})
+                    num_str = item.get("number", "")
+                    if num_str:
+                        parsed = cls.parse_raw_numbers(code, num_str, lottery_type)
+                        if parsed:
+                            results.append(parsed)
                 if results:
                     return results
         except Exception:
             pass
 
-        # 通道 3: 第三方镜像源
-        url3 = f"https://api.oick.cn/lottery/api.php?type=ssq&limit={limit}"
+        # ---------------- 免费 API 2: OICK 免费开放彩票 API ----------------
         try:
-            res = requests.get(url3, headers=cls.HEADERS, timeout=5)
+            url = f"https://api.oick.cn/lottery/api.php?type={lottery_type}&limit={limit}"
+            res = requests.get(url, headers=cls.HEADERS, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 data_list = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
                 results = []
                 for item in data_list[:limit]:
-                    code = str(item.get("expect", ""))
-                    opencode = item.get("opencode", "")
-                    if "+" in opencode:
-                        p1, p2 = opencode.split("+")
-                        reds = [int(x) for x in p1.split(",") if x.isdigit()]
-                        blue = int(p2) if p2.isdigit() else None
-                        results.append({"period": code, "reds": reds, "blue": blue, "blues": [blue]})
+                    code = str(item.get("expect", item.get("period", "")))
+                    opencode = item.get("opencode", item.get("openCode", ""))
+                    if opencode:
+                        parsed = cls.parse_raw_numbers(code, opencode, lottery_type)
+                        if parsed:
+                            results.append(parsed)
                 if results:
                     return results
         except Exception:
             pass
 
-        # 若三级网络通道因跨境 DNS 污染均被截断，启用内置真实盘口兜底
-        return REAL_FALLBACK_SSQ
+        # ---------------- 免费 API 3: RollTools 免费公共 API ----------------
+        try:
+            type_map_roll = {"ssq": "ssq", "dlt": "dlt", "3d": "fc3d", "lhc": "lhc"}
+            url = f"https://www.mxnzp.com/api/lottery/common/list?code={type_map_roll.get(lottery_type, 'ssq')}&page=1&app_id=qqqqqqqqqqqqqqqq&app_secret=1111111111111111"
+            res = requests.get(url, headers=cls.HEADERS, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("code") == 1:
+                    list_data = data.get("data", {}).get("list", [])
+                    results = []
+                    for item in list_data[:limit]:
+                        code = str(item.get("issue", ""))
+                        open_code = item.get("openCode", "")
+                        parsed = cls.parse_raw_numbers(code, open_code, lottery_type)
+                        if parsed:
+                            results.append(parsed)
+                    if results:
+                        return results
+        except Exception:
+            pass
+
+        # ---------------- 免费 API 4: 网页实时提取接口 (保底真实解析) ----------------
+        try:
+            if lottery_type == "ssq":
+                html_url = "https://kaijiang.500.com/ssq.shtml"
+            elif lottery_type == "dlt":
+                html_url = "https://kaijiang.500.com/dlt.shtml"
+            elif lottery_type == "3d":
+                html_url = "https://kaijiang.500.com/sd.shtml"
+            else:
+                html_url = None
+
+            if html_url:
+                res = requests.get(html_url, headers=cls.HEADERS, timeout=5)
+                res.encoding = "gb2312"
+                if res.status_code == 200:
+                    period_match = re.search(r'font_red1"><b>(\d+)</b>', res.text)
+                    nums = re.findall(r'<li class="ball_red">(\d+)</li>', res.text)
+                    blue_num = re.findall(r'<li class="ball_blue">(\d+)</li>', res.text)
+                    if period_match and nums:
+                        period = period_match.group(1)
+                        reds = [int(x) for x in nums]
+                        blues = [int(x) for x in blue_num] if blue_num else []
+                        blue = blues[0] if blues else None
+                        return [{"period": period, "reds": reds, "blue": blue, "blues": blues}]
+        except Exception:
+            pass
+
+        # 若全部免费 API 均因防火墙截断失败，不返回伪造数据，直接返回空
+        return []
+
+    @staticmethod
+    def parse_raw_numbers(code: str, raw_str: str, lottery_type: str) -> Dict[str, Any]:
+        """精准拆分正码与特码/蓝球"""
+        raw_str = raw_str.replace("+", "|").replace(" ", ",").replace("-", ",").replace(":", ",")
+        parts = raw_str.split("|")
+
+        red_part = parts[0]
+        blue_part = parts[1] if len(parts) > 1 else ""
+
+        reds = [int(x) for x in red_part.split(",") if x.strip().isdigit()]
+        blues = [int(x) for x in blue_part.split(",") if x.strip().isdigit()]
+
+        blue = blues[0] if blues else None
+
+        return {
+            "period": code,
+            "reds": reds,
+            "blue": blue,
+            "blues": blues
+        }
 
     @classmethod
     def analyze(cls, lottery_type: str, history_limit: int = 40) -> Dict[str, Any]:
-        if lottery_type == "ssq":
-            history = cls.fetch_ssq_data(history_limit)
-        else:
-            history = REAL_FALLBACK_SSQ
-
+        history = cls.fetch_real_lottery(lottery_type, history_limit)
+        
         if not history:
-            return {"error": "暂无法同步数据，请检查网络设置。"}
+            return {
+                "error": "⚠️ 当前所有免费 API 接口均暂时无法连接或请求超时，请检查网络后再试。"
+            }
 
-        latest_item = history[0]
-        latest_period = latest_item["period"]
-        total_fetched = len(history)
+        latest = history[0]
+        period = latest["period"]
+        total = len(history)
 
-        latest_draw = f"🔴 红球: {latest_item['reds']}  |  🔵 蓝球: [{latest_item['blue']}]"
-        
-        # 基于真实历史号码进行冷热码提取
-        all_reds = [num for item in history for num in item["reds"]]
-        hot_reds = pd.Series(all_reds).value_counts().head(15).index.tolist()
-        rec_reds = sorted(random.sample(hot_reds, 6)) if len(hot_reds) >= 6 else [2, 9, 14, 21, 25, 31]
-        
-        all_blues = [item["blue"] for item in history if item["blue"] is not None]
-        hot_blue = int(pd.Series(all_blues).value_counts().index[0]) if all_blues else 8
+        # 1. 双色球
+        if lottery_type == "ssq":
+            draw = f"🔴 红球: {latest['reds']}  |  🔵 蓝球: [{latest['blue']}]"
+            all_reds = [num for item in history for num in item["reds"]]
+            hot_reds = pd.Series(all_reds).value_counts().head(15).index.tolist()
+            all_blues = [item["blue"] for item in history if item["blue"] is not None]
+            hot_blue = int(pd.Series(all_blues).value_counts().index[0]) if all_blues else None
 
-        return {
-            "彩种": "双色球 (真实开奖数据)",
-            "最新期号": latest_period,
-            "最新开奖号码": latest_draw,
-            "解析真实期数": total_fetched,
-            "算法推荐组合": f"🔴 红球: {rec_reds}  |  🔵 蓝球: [{hot_blue}]",
-            "热码分析": hot_reds
-        }
+            return {
+                "彩种名称": "双色球 (SSQ)",
+                "最新开奖期号": period,
+                "真实开奖号码": draw,
+                "获取真实数据期数": f"近 {total} 期",
+                "高频热码(红球)": hot_reds,
+                "高频热码(蓝球)": hot_blue
+            }
+
+        # 2. 超级大乐透
+        elif lottery_type == "dlt":
+            draw = f"🔴 前区: {latest['reds']}  |  🔵 后区: {latest['blues']}"
+            all_reds = [num for item in history for num in item["reds"]]
+            hot_reds = pd.Series(all_reds).value_counts().head(15).index.tolist()
+            all_blues = [b for item in history for b in item["blues"]]
+            hot_blues = sorted([int(x) for x in pd.Series(all_blues).value_counts().head(2).index.tolist()]) if all_blues else []
+
+            return {
+                "彩种名称": "超级大乐透 (DLT)",
+                "最新开奖期号": period,
+                "真实开奖号码": draw,
+                "获取真实数据期数": f"近 {total} 期",
+                "前区高频热码": hot_reds,
+                "后区高频热码": hot_blues
+            }
+
+        # 3. 福彩 3D
+        elif lottery_type == "3d":
+            draw = f"🎯 开奖号码: {latest['reds']}"
+            return {
+                "彩种名称": "福彩 3D",
+                "最新开奖期号": period,
+                "真实开奖号码": draw,
+                "获取真实数据期数": f"近 {total} 期"
+            }
+
+        # 4. 香港六合彩 (含专属特码)
+        elif lottery_type == "lhc":
+            draw = f"🔴 正码: {latest['reds']}  |  🌟 专属特码: [{latest['blue']}]"
+            all_reds = [num for item in history for num in item["reds"]]
+            hot_reds = pd.Series(all_reds).value_counts().head(18).index.tolist()
+            all_specials = [item["blue"] for item in history if item["blue"] is not None]
+            hot_special = int(pd.Series(all_specials).value_counts().index[0]) if all_specials else None
+
+            return {
+                "彩种名称": "香港六合彩 (LHC)",
+                "最新开奖期号": period,
+                "真实开奖号码": draw,
+                "获取真实数据期数": f"近 {total} 期",
+                "正码热号": hot_reds,
+                "特码热号": hot_special
+            }
 
 def main():
-    st.set_page_config(page_title="高级抗封锁彩票数据分析平台", page_icon="🎰", layout="wide")
-    st.title("🎰 高级多通道真实彩票分析平台")
-    st.caption("网络层优化：具备 DNS 防污染 + 自动多源轮询 + 海外节点智能穿透")
+    st.set_page_config(page_title="真实彩票 API 数据平台", page_icon="🎰", layout="wide")
+    st.title("🎰 真实彩票 API 数据与多源备用系统")
+    st.caption("网络策略：首选抓取 -> 自动轮询调取免费 API 接口 -> 绝对不生成虚拟数据")
     st.markdown("---")
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.subheader("⚙️ 参数配置")
-        lottery_choice = st.selectbox("选择分析彩种", options=["ssq"], format_func=lambda x: "🔴 🔵 双色球 (SSQ)")
+        st.subheader("⚙️ 彩种选择")
+        lottery_choice = st.selectbox(
+            "选择彩种",
+            options=["ssq", "dlt", "3d", "lhc"],
+            format_func=lambda x: {
+                "ssq": "🔴 🔵 双色球 (SSQ)",
+                "dlt": "🔴 🔵 超级大乐透 (DLT)",
+                "3d": "🎯 福彩 3D",
+                "lhc": "🌟 香港六合彩 (含特码)"
+            }[x]
+        )
+
         history_count = st.slider("同步历史期数", 10, 100, 40, step=10)
-        btn = st.button("🚀 启动穿透引擎并实时分析", type="primary", use_container_width=True)
+        btn = st.button("🚀 调取真实 API 获取开奖号", type="primary", use_container_width=True)
 
     with col2:
         if btn:
-            with st.spinner("正在通过穿透通道同步最新真实开奖记录..."):
-                res = AdvancedLotteryEngine.analyze(lottery_choice, history_count)
+            with st.spinner("正在自动尝试并切换免费 API 获取最新公布开奖号码..."):
+                res = RealLotteryApiEngine.analyze(lottery_choice, history_count)
 
                 if "error" not in res:
-                    st.success(f"✅ **数据同步成功！** 最新开奖期号：**第 {res['最新期号']} 期**")
-                    st.markdown(f"### 📢 本期真实开奖号码\n> **{res['最新开奖号码']}**")
+                    st.success(f"✅ **真实 API 数据获取成功！** 彩种：**{res['彩种名称']}** | 期号：第 **{res['最新开奖期号']}** 期")
+                    st.markdown(f"### 📢 官方实时开奖结果\n> **{res['真实开奖号码']}**")
                     st.markdown("---")
-                    st.subheader("💡 算法推演推荐号码")
-                    st.markdown(f"### {res['算法推荐组合']}")
-                    st.markdown("---")
+                    st.subheader("📊 详细分析与热码汇总")
                     st.json(res)
                 else:
                     st.error(res["error"])
